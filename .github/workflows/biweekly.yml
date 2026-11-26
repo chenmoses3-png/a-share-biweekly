@@ -1,0 +1,103 @@
+name: A股双周更新
+
+on:
+  # 每周一 04:07 UTC，即北京时间 12:07；脚本内部再判断是否为双周。
+  schedule:
+    - cron: '7 4 * * 1'
+  # 手动运行不受双周限制，方便首次测试。
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖和中文字体
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests pandas matplotlib
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+
+      - name: 更新图表与表格
+        id: generate
+        env:
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          DEFER_PUSH: '1'
+        run: |
+          python "a股双周更新.py"
+          if [ -f "out/三大指数对比.md" ]; then
+            echo "generated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "generated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 发布结果到 output 分支
+        if: steps.generate.outputs.generated == 'true'
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/results"
+          cp -a out/. "$RUNNER_TEMP/results/"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin output || true
+          rm -rf out
+
+          if git rev-parse --verify origin/output >/dev/null 2>&1; then
+            git checkout -B output origin/output
+          else
+            git checkout --orphan output
+            git rm -rf . || true
+          fi
+
+          mkdir -p out
+          cp -a "$RUNNER_TEMP/results/." out/
+          git add out
+          if git diff --cached --quiet; then
+            echo "结果没有变化，无需提交"
+            exit 0
+          fi
+          git commit -m "更新 A股双周报告 $(date -u +%Y-%m-%d)"
+          git push -u origin output
+
+      - name: 推送到手机微信
+        if: steps.generate.outputs.generated == 'true'
+        env:
+          SCT_SENDKEY: ${{ secrets.SCT_SENDKEY }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import requests
+
+          key = os.environ.get("SCT_SENDKEY")
+          if not key:
+              print("未配置 SCT_SENDKEY，跳过微信推送；图表和表格仍已发布。")
+              raise SystemExit(0)
+
+          with open("out/推送内容.json", encoding="utf-8") as f:
+              payload = json.load(f)
+          response = requests.post(
+              f"https://sctapi.ftqq.com/{key}.send",
+              data=payload,
+              timeout=30,
+          )
+          try:
+              result = response.json()
+          except ValueError:
+              result = {"raw": response.text[:300]}
+          if not response.ok or result.get("code") != 0:
+              raise RuntimeError(f"Server酱推送失败：HTTP {response.status_code}，{result}")
+          print("Server酱推送成功")
+          PY
