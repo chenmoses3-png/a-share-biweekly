@@ -41,8 +41,13 @@ def get_json(url, params=None, headers=None, timeout=45, tries=4):
     raise last
 
 # ---------- 双周门控 ----------
+def beijing_today():
+    """云端服务器使用 UTC，统一按北京时间标注日期。"""
+    return dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
+
+
 def is_due_week(today=None):
-    today = today or dt.date.today()
+    today = today or beijing_today()
     anchor = dt.date(2026, 11, 30)
     days = (today - anchor).days
     if days < 0:
@@ -86,7 +91,7 @@ def draw_bond_equity(j):
 # ---------- 数据：三大指数 ----------
 def tx_weekly(sym):
     j = get_json("https://web.ifzq.gtimg.cn/appstock/app/kline/kline",
-                 params={"param": f"{sym},week,2024-01-01,{dt.date.today():%Y-%m-%d},400"})
+                 params={"param": f"{sym},week,2024-01-01,{beijing_today():%Y-%m-%d},400"})
     rows = j["data"][sym]["week"]
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df[0])
@@ -137,7 +142,7 @@ def build_index_table():
     return rows
 
 def render_report(rows, be):
-    today = dt.date.today().isoformat()
+    today = beijing_today().isoformat()
     lines = [
         f"# A股双周更新（{today}）", "",
         f"## 一、股债对照图（数据截至 {be['as_of']}）", "",
@@ -181,19 +186,22 @@ def main():
     chart = draw_bond_equity(be)
     rows = build_index_table()
     md = render_report(rows, be)
+    # 摘要推送：股债图与指数行情分别标注日期；图片使用 CDN 并保留文字链接兜底。
     repo = os.environ.get("GITHUB_REPOSITORY", "")
-    version = dt.date.today().isoformat()
-    img_url = f"https://raw.githubusercontent.com/{repo}/output/out/%E8%82%A1%E5%80%BA%E5%AF%B9%E7%85%A7.png?v={version}" if repo else ""
+    version = beijing_today().isoformat()
+    img_url = f"https://cdn.jsdelivr.net/gh/{repo}@output/out/%E8%82%A1%E5%80%BA%E5%AF%B9%E7%85%A7.png?v={version}" if repo else ""
+    index_date = max(r["last_date"] for r in rows)
     desp_lines = [
-        f"**数据截至 {be['as_of']}**", "",
+        f"**股债图：截至 {be['as_of']}（源站周频）**",
+        f"**三大指数行情：截至 {index_date}**", "",
         f"沪深300全收益 {be['hs300_last']:,.0f}（年化 {be['hs300_cagr']}%） / 二级债基 {be['wind_last']:,.0f}（年化 {be['wind_cagr']}%）",
         "",
     ]
     for r in rows:
         desp_lines.append(f"- {r['name']}：{r['last']:,.0f} 点，距年内高点 {r['dd']:.1f}%，近两周 {r['chg2w']:+.1f}%")
     if img_url:
-        desp_lines += ["", f"![股债对照图]({img_url})", "", f"[查看完整对比表](https://github.com/{repo}/blob/output/out/%E4%B8%89%E5%A4%A7%E6%8C%87%E6%95%B0%E5%AF%B9%E6%AF%94.md)"]
-    payload = {"title": f"A股双周更新 {dt.date.today():%m-%d}", "desp": "\n".join(desp_lines)}
+        desp_lines += ["", f"![股债对照图]({img_url})", "", f"[查看股债图]({img_url}) ｜ [查看完整对比表](https://github.com/{repo}/blob/output/out/%E4%B8%89%E5%A4%A7%E6%8C%87%E6%95%B0%E5%AF%B9%E6%AF%94.md)"]
+    payload = {"title": f"A股双周更新 {beijing_today():%m-%d}", "desp": "\n".join(desp_lines)}
     with open(os.path.join(OUT, "推送内容.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     if os.environ.get("DEFER_PUSH") == "1":
