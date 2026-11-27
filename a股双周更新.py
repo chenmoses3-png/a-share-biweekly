@@ -7,7 +7,7 @@ A股双周更新（云端全自动版，无需 AI）
   3) 若配置环境变量 SCT_SENDKEY，则通过 Server酱 将两张图片推送到微信
 频率控制：由调用方每周一触发，本脚本仅在“双周周”真正执行（以 2026-11-30 为第 0 周）。
 """
-import os, sys, json, datetime as dt, hashlib, re
+import os, sys, json, datetime as dt, hashlib, re, shutil
 import requests
 import pandas as pd
 import matplotlib
@@ -304,11 +304,14 @@ def main():
     rows = build_index_table()
     table_image = render_index_image(rows)
     md = render_report(rows, be)
-    # 两张图片均使用已验证可见的 CDN 线路；每次运行使用唯一地址，避免微信缓存旧图。
+    # 每次运行复制为独立文件名：微信可能忽略查询参数，只有路径本身变化才能彻底避开旧图缓存。
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     version = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).strftime("%Y-%m-%d-%H%M%S")
-    img_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/out/%E8%82%A1%E5%80%BA%E5%AF%B9%E7%85%A7.png?v={version}" if repo else ""
-    table_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/{requests.utils.quote('out/三大指数对比.png')}?v={version}" if repo else ""
+    chart_name, table_name = f"股债对照-{version}.png", f"三大指数对比-{version}.png"
+    shutil.copyfile(chart, os.path.join(OUT, chart_name))
+    shutil.copyfile(table_image, os.path.join(OUT, table_name))
+    img_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/{requests.utils.quote('out/' + chart_name)}" if repo else ""
+    table_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/{requests.utils.quote('out/' + table_name)}" if repo else ""
     index_date = max(r["last_date"] for r in rows)
     desp_lines = [
         f"**股债图：截至 {be['as_of']}（源站周频）**",
