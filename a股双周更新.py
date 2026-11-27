@@ -304,9 +304,9 @@ def main():
     rows = build_index_table()
     table_image = render_index_image(rows)
     md = render_report(rows, be)
-    # 两张图片均使用已验证可见的 CDN 线路，并保留文字链接兜底。
+    # 两张图片均使用已验证可见的 CDN 线路；每次运行使用唯一地址，避免微信缓存旧图。
     repo = os.environ.get("GITHUB_REPOSITORY", "")
-    version = beijing_today().isoformat()
+    version = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).strftime("%Y-%m-%d-%H%M%S")
     img_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/out/%E8%82%A1%E5%80%BA%E5%AF%B9%E7%85%A7.png?v={version}" if repo else ""
     table_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/{requests.utils.quote('out/三大指数对比.png')}?v={version}" if repo else ""
     index_date = max(r["last_date"] for r in rows)
