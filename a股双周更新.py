@@ -3,8 +3,8 @@
 A股双周更新（云端全自动版，无需 AI）
 产出：
   1) out/股债对照.png  —— 沪深300全收益 vs 万得二级债基（原图同源数据）
-  2) out/三大指数对比.md —— 上证 / 创业板 / 科创50 全景表
-  3) 若配置环境变量 SCT_SENDKEY，则通过 Server酱 推送摘要到微信
+  2) out/三大指数对比.png / .md —— 上证 / 创业板 / 科创50 完整全景表
+  3) 若配置环境变量 SCT_SENDKEY，则通过 Server酱 将两张图片推送到微信
 频率控制：由调用方每周一触发，本脚本仅在“双周周”真正执行（以 2026-11-30 为第 0 周）。
 """
 import os, sys, json, datetime as dt
@@ -48,7 +48,7 @@ def beijing_today():
 
 def is_due_week(today=None):
     today = today or beijing_today()
-    anchor = dt.date(2026, 11, 30)
+    anchor = dt.date(2026, 11, 30)  # 首次执行周（周一）
     days = (today - anchor).days
     if days < 0:
         return False
@@ -110,11 +110,28 @@ def danjuan_valuation():
     except Exception:
         return {}
 
+
+def historical_pe_at(dj_code, peak_date):
+    """取距离高点日最近的一条同源 PE 记录；无记录时返回空值。"""
+    try:
+        j = get_json(f"https://danjuanfunds.com/djapi/index_eva/pe_history/{dj_code}",
+                     params={"day": "all"}, headers=UA, tries=2)
+        items = j.get("data", {}).get("index_eva_pe_growths", [])
+        if not items:
+            return None, None
+        target = pd.Timestamp(peak_date)
+        best = min(items, key=lambda it: abs(pd.to_datetime(it["ts"], unit="ms") - target))
+        return float(best["pe"]), str(pd.to_datetime(best["ts"], unit="ms").date())
+    except Exception:
+        return None, None
+
+
 INDEXES = [
     ("上证指数", "sh000001", "SH000001"),
     ("创业板指", "sz399006", "SZ399006"),
     ("科创50", "sh000688", "SH000688"),
 ]
+
 
 def build_index_table():
     val = danjuan_valuation()
@@ -135,11 +152,59 @@ def build_index_table():
         pct = v.get("pe_percentile")
         pe_txt = f"{pe:.1f} 倍" if pe else "—"
         pct_txt = f"{pct*100:.1f}%" if isinstance(pct, (int, float)) and pct <= 1 else (f"{pct:.1f}%" if pct else "—")
+        peak_pe, peak_pe_date = historical_pe_at(dj_code, str(peak_date.date()))
         rows.append(dict(name=name, last=last, last_date=str(last_date.date()),
                          peak=peak, peak_date=str(peak_date.date()),
                          dd=dd, maxdd=maxdd, days=days, chg2w=chg2w,
-                         pe=pe_txt, pct=pct_txt))
+                         pe=pe_txt, pct=pct_txt, peak_pe=peak_pe,
+                         peak_pe_date=peak_pe_date))
     return rows
+
+
+def render_index_image(rows):
+    """把完整指标表渲染成适合微信查看的竖向图片。"""
+    index_date = max(r["last_date"] for r in rows)
+    labels = ["本轮高点", "最新点位", "距本轮高点", "区间最大回撤", "调整时长",
+              "近两周涨跌", "当前 PE-TTM", "估值历史分位", "高点时 PE"]
+    data = []
+    for r in rows:
+        peak_pe = f"{r['peak_pe']:.1f} 倍" if r["peak_pe"] is not None else "—"
+        if r["peak_pe_date"]:
+            peak_pe += f"\n{r['peak_pe_date'][5:]}"
+        data.append([
+            f"{r['peak']:,.2f}\n{r['peak_date'][5:]}",
+            f"{r['last']:,.2f}\n{r['last_date'][5:]}",
+            f"{r['dd']:.1f}%", f"{r['maxdd']:.1f}%", f"{r['days']} 天",
+            f"{r['chg2w']:+.1f}%", r["pe"], r["pct"], peak_pe,
+        ])
+    fig, ax = plt.subplots(figsize=(12, 10.5), facecolor="white")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    ax.text(0.04, 0.955, "三大指数全景对比", fontsize=25, fontweight="bold", color="#17233c")
+    ax.text(0.04, 0.918, f"行情截至 {index_date}｜估值为蛋卷口径", fontsize=12, color="#718096")
+    lefts = [0.04, 0.27, 0.51, 0.75]
+    for x, text in zip(lefts, ["维度"] + [r["name"] for r in rows]):
+        ax.text(x, 0.855, text, fontsize=15, fontweight="bold", color="#17233c")
+    top, bottom = 0.81, 0.13
+    step = (top - bottom) / len(labels)
+    for i, label in enumerate(labels):
+        y = top - i * step
+        if i % 2 == 0:
+            ax.add_patch(plt.Rectangle((0.025, y - step + 0.008), 0.95, step,
+                                       color="#f6f8fb", zorder=0))
+        ax.text(lefts[0], y - step * 0.55, label, fontsize=13.5,
+                fontweight="bold" if i in (2, 3) else "normal", color="#344054", va="center")
+        for j in range(3):
+            ax.text(lefts[j + 1], y - step * 0.55, data[j][i], fontsize=13.5,
+                    color="#101828", va="center", linespacing=1.5)
+        ax.plot([0.03, 0.97], [y - step + 0.008, y - step + 0.008], color="#e5eaf0", lw=0.7)
+    ax.text(0.04, 0.065, "注：高点时 PE 取距离高点日最近的同源记录；— 表示暂无同源数据。", fontsize=10.5, color="#718096")
+    ax.text(0.04, 0.035, "数据：腾讯行情、蛋卷基金。自动生成，不构成投资建议。", fontsize=10.5, color="#98a2b3")
+    path = os.path.join(OUT, "三大指数对比.png")
+    fig.savefig(path, dpi=160, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
 
 def render_report(rows, be):
     today = beijing_today().isoformat()
@@ -150,14 +215,15 @@ def render_report(rows, be):
         f"- 万得二级债基：**{be['wind_last']:,.0f}**，年化 **{be['wind_cagr']}%**",
         f"- 股/债累计回报比：**{be['hs300_last']/be['wind_last']:.2f} 倍**", "",
         "## 二、三大指数全景对比", "",
-        "| 指数 | 最新点位 | 日期 | 年内高点(日期) | 距高点 | 区间最大回撤 | 调整天数 | 近两周 | PE | PE分位 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| 指数 | 最新点位 | 日期 | 年内高点(日期) | 距高点 | 区间最大回撤 | 调整天数 | 近两周 | PE | PE分位 | 高点时PE(记录日期) |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
+        peak_pe = f"{r['peak_pe']:.1f} 倍（{r['peak_pe_date']}）" if r["peak_pe"] is not None else "—"
         lines.append(
-            f"| {r['name']} | {r['last']:,.2f} | {r['last_date']} | {r['peak']:,.0f}（{r['peak_date']}） "
-            f"| {r['dd']:.1f}% | {r['maxdd']:.1f}% | {r['days']} 天 | {r['chg2w']:+.1f}% | {r['pe']} | {r['pct']} |")
-    lines += ["", "图文件：股债对照.png；本表：三大指数对比.md。自动生成，不构成投资建议。"]
+            f"| {r['name']} | {r['last']:,.2f} | {r['last_date']} | {r['peak']:,.2f}（{r['peak_date']}） "
+            f"| {r['dd']:.1f}% | {r['maxdd']:.1f}% | {r['days']} 天 | {r['chg2w']:+.1f}% | {r['pe']} | {r['pct']} | {peak_pe} |")
+    lines += ["", "图文件：股债对照.png、三大指数对比.png；表格文本：三大指数对比.md。自动生成，不构成投资建议。"]
     md = "\n".join(lines)
     with open(os.path.join(OUT, "三大指数对比.md"), "w", encoding="utf-8") as f:
         f.write(md)
@@ -185,11 +251,13 @@ def main():
     be = fetch_bond_equity()
     chart = draw_bond_equity(be)
     rows = build_index_table()
+    table_image = render_index_image(rows)
     md = render_report(rows, be)
-    # 摘要推送：股债图与指数行情分别标注日期；图片使用 CDN 并保留文字链接兜底。
+    # 两张图片均使用已验证可见的 CDN 线路，并保留文字链接兜底。
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     version = beijing_today().isoformat()
     img_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/out/%E8%82%A1%E5%80%BA%E5%AF%B9%E7%85%A7.png?v={version}" if repo else ""
+    table_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/{requests.utils.quote('out/三大指数对比.png')}?v={version}" if repo else ""
     index_date = max(r["last_date"] for r in rows)
     desp_lines = [
         f"**股债图：截至 {be['as_of']}（源站周频）**",
@@ -198,9 +266,13 @@ def main():
         "",
     ]
     for r in rows:
-        desp_lines.append(f"- {r['name']}：{r['last']:,.0f} 点，距年内高点 {r['dd']:.1f}%，近两周 {r['chg2w']:+.1f}%")
-    if img_url:
-        desp_lines += ["", f"![股债对照图]({img_url})", "", f"[查看股债图]({img_url}) ｜ [查看完整对比表](https://github.com/{repo}/blob/output/out/%E4%B8%89%E5%A4%A7%E6%8C%87%E6%95%B0%E5%AF%B9%E6%AF%94.md)"]
+        desp_lines.append(f"- {r['name']}：{r['last']:,.2f} 点，距高点 {r['dd']:.1f}%，近两周 {r['chg2w']:+.1f}%")
+    if img_url and table_url:
+        desp_lines += [
+            "", "**① 股债长期收益对照**", f"![股债对照图]({img_url})",
+            "", "**② 三大指数全景对比（完整指标）**", f"![三大指数全景对比]({table_url})",
+            "", f"[查看股债图]({img_url}) ｜ [查看完整对比表图片]({table_url})",
+        ]
     payload = {"title": f"A股双周更新 {beijing_today():%m-%d}", "desp": "\n".join(desp_lines)}
     with open(os.path.join(OUT, "推送内容.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -208,7 +280,7 @@ def main():
         print("[push] 推送内容已保存，待结果发布后再发送")
     else:
         push_serverchan(payload["title"], payload["desp"])
-    print("完成：", chart)
+    print("完成：", chart, table_image)
     print(md)
 
 if __name__ == "__main__":
