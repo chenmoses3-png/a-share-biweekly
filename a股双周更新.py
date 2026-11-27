@@ -189,7 +189,7 @@ def main():
     # 摘要推送：股债图与指数行情分别标注日期；图片使用 CDN 并保留文字链接兜底。
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     version = beijing_today().isoformat()
-    img_url = f"https://cdn.jsdelivr.net/gh/{repo}@output/out/%E8%82%A1%E5%80%BA%E5%AF%B9%E7%85%A7.png?v={version}" if repo else ""
+    img_url = f"https://cdn.jsdmirror.com/gh/{repo}@output/out/%E8%82%A1%E5%80%BA%E5%AF%B9%E7%85%A7.png?v={version}" if repo else ""
     index_date = max(r["last_date"] for r in rows)
     desp_lines = [
         f"**股债图：截至 {be['as_of']}（源站周频）**",
