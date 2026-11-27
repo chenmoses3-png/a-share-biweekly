@@ -7,7 +7,7 @@ A股双周更新（云端全自动版，无需 AI）
   3) 若配置环境变量 SCT_SENDKEY，则通过 Server酱 将两张图片推送到微信
 频率控制：由调用方每周一触发，本脚本仅在“双周周”真正执行（以 2026-11-30 为第 0 周）。
 """
-import os, sys, json, datetime as dt
+import os, sys, json, datetime as dt, hashlib, re
 import requests
 import pandas as pd
 import matplotlib
@@ -126,6 +126,51 @@ def historical_pe_at(dj_code, peak_date):
         return None, None
 
 
+def shanghai_valuation(peak_date, last_date):
+    """沪市整体平均 PE：乐咕近 10 年分位，上交所高点日 PE；失败则保留空值。"""
+    pe = pct = peak_pe = peak_pe_date = None
+    records = []
+    try:
+        session = requests.Session()
+        session.headers.update(UA)
+        page = session.get("https://legulegu.com/stockdata/shanghaiPE", timeout=30)
+        page.raise_for_status()
+        match = re.search(r'<meta[^>]+name=["\']_csrf["\'][^>]+content=["\']([^"\']+)', page.text)
+        if not match:
+            raise ValueError("乐咕页面未返回 CSRF token")
+        token = hashlib.md5(dt.datetime.now().date().isoformat().encode()).hexdigest().lower()
+        response = session.get("https://legulegu.com/api/stock-data/market-pe",
+                               params={"token": token, "marketId": "1"},
+                               headers={"X-CSRF-Token": match.group(1)}, timeout=30)
+        response.raise_for_status()
+        records = response.json().get("data", [])
+        records = sorted(records, key=lambda x: x["date"])
+        if records:
+            latest = records[-1]
+            pe = float(latest["pe"])
+            start = (pd.Timestamp(latest["date"]) - pd.DateOffset(years=10)).date().isoformat()
+            sample = [float(x["pe"]) for x in records if start <= x["date"] <= latest["date"]]
+            pct = sum(x <= pe for x in sample) / len(sample) * 100 if sample else None
+    except Exception as e:
+        print("[valuation] 乐咕上证估值获取失败:", e)
+    try:
+        result = get_json("https://query.sse.com.cn/commonQuery.do",
+                          params={"sqlId": "COMMON_SSE_SJ_GPSJ_CJGK_MRGK_C",
+                                  "PRODUCT_CODE": "01,02,03,11,17", "type": "inParams",
+                                  "SEARCH_DATE": peak_date},
+                          headers={**UA, "Referer": "https://www.sse.com.cn/"}, tries=2).get("result", [])
+        item = next((x for x in result if x.get("PRODUCT_CODE") == "17"), None)
+        if item and item.get("AVG_PE_RATE") not in (None, ""):
+            peak_pe, peak_pe_date = float(item["AVG_PE_RATE"]), peak_date
+    except Exception as e:
+        print("[valuation] 上交所高点 PE 获取失败:", e)
+    if peak_pe is None and records:
+        target = pd.Timestamp(peak_date)
+        best = min(records, key=lambda x: abs(pd.Timestamp(x["date"]) - target))
+        peak_pe, peak_pe_date = float(best["pe"]), best["date"]
+    return pe, pct, peak_pe, peak_pe_date
+
+
 INDEXES = [
     ("上证指数", "sh000001", "SH000001"),
     ("创业板指", "sz399006", "SZ399006"),
@@ -147,17 +192,22 @@ def build_index_table():
         maxdd = (trough / peak - 1) * 100
         days = (last_date - peak_date).days
         chg2w = (last / float(s.iloc[-3]) - 1) * 100 if len(s) >= 3 else None
-        v = val.get(dj_code, {})
-        pe = v.get("pe")
-        pct = v.get("pe_percentile")
-        pe_txt = f"{pe:.1f} 倍" if pe else "—"
-        pct_txt = f"{pct*100:.1f}%" if isinstance(pct, (int, float)) and pct <= 1 else (f"{pct:.1f}%" if pct else "—")
-        peak_pe, peak_pe_date = historical_pe_at(dj_code, str(peak_date.date()))
+        if name == "上证指数":
+            pe, pct, peak_pe, peak_pe_date = shanghai_valuation(str(peak_date.date()), str(last_date.date()))
+            pe_txt = f"{pe:.1f} 倍*" if pe is not None else "—"
+            pct_txt = f"{pct:.1f}%*（近10年）" if pct is not None else "—"
+        else:
+            v = val.get(dj_code, {})
+            pe = v.get("pe")
+            pct = v.get("pe_percentile")
+            pe_txt = f"{pe:.1f} 倍" if pe else "—"
+            pct_txt = f"{pct*100:.1f}%" if isinstance(pct, (int, float)) and pct <= 1 else (f"{pct:.1f}%" if pct else "—")
+            peak_pe, peak_pe_date = historical_pe_at(dj_code, str(peak_date.date()))
         rows.append(dict(name=name, last=last, last_date=str(last_date.date()),
                          peak=peak, peak_date=str(peak_date.date()),
                          dd=dd, maxdd=maxdd, days=days, chg2w=chg2w,
                          pe=pe_txt, pct=pct_txt, peak_pe=peak_pe,
-                         peak_pe_date=peak_pe_date))
+                         peak_pe_date=peak_pe_date, is_shanghai=(name == "上证指数")))
     return rows
 
 
@@ -165,10 +215,10 @@ def render_index_image(rows):
     """把完整指标表渲染成适合微信查看的竖向图片。"""
     index_date = max(r["last_date"] for r in rows)
     labels = ["本轮高点", "最新点位", "距本轮高点", "区间最大回撤", "调整时长",
-              "近两周涨跌", "当前 PE-TTM", "估值历史分位", "高点时 PE"]
+              "近两周涨跌", "当前 PE", "估值历史分位", "高点时 PE"]
     data = []
     for r in rows:
-        peak_pe = f"{r['peak_pe']:.1f} 倍" if r["peak_pe"] is not None else "—"
+        peak_pe = f"{r['peak_pe']:.1f} 倍{'*' if r['is_shanghai'] else ''}" if r["peak_pe"] is not None else "—"
         if r["peak_pe_date"]:
             peak_pe += f"\n{r['peak_pe_date'][5:]}"
         data.append([
@@ -182,7 +232,7 @@ def render_index_image(rows):
     ax.set_ylim(0, 1)
     ax.axis("off")
     ax.text(0.04, 0.955, "三大指数全景对比", fontsize=25, fontweight="bold", color="#17233c")
-    ax.text(0.04, 0.918, f"行情截至 {index_date}｜估值为蛋卷口径", fontsize=12, color="#718096")
+    ax.text(0.04, 0.918, f"行情截至 {index_date}｜* 上证为沪市整体口径，其余为蛋卷 PE-TTM", fontsize=12, color="#718096")
     lefts = [0.04, 0.27, 0.51, 0.75]
     for x, text in zip(lefts, ["维度"] + [r["name"] for r in rows]):
         ax.text(x, 0.855, text, fontsize=15, fontweight="bold", color="#17233c")
@@ -199,8 +249,9 @@ def render_index_image(rows):
             ax.text(lefts[j + 1], y - step * 0.55, data[j][i], fontsize=13.5,
                     color="#101828", va="center", linespacing=1.5)
         ax.plot([0.03, 0.97], [y - step + 0.008, y - step + 0.008], color="#e5eaf0", lw=0.7)
-    ax.text(0.04, 0.065, "注：高点时 PE 取距离高点日最近的同源记录；— 表示暂无同源数据。", fontsize=10.5, color="#718096")
-    ax.text(0.04, 0.035, "数据：腾讯行情、蛋卷基金。自动生成，不构成投资建议。", fontsize=10.5, color="#98a2b3")
+    ax.text(0.04, 0.073, "* 上证为沪市整体平均 PE（交易所口径），分位按近 10 年月末序列计算；其余指数为蛋卷 PE-TTM。", fontsize=10, color="#718096")
+    ax.text(0.04, 0.045, "上证高点 PE 取上交所当日值；其余指数取距离高点日最近的蛋卷记录。", fontsize=10, color="#718096")
+    ax.text(0.04, 0.017, "数据：腾讯行情、乐咕、上交所、蛋卷基金。自动生成，不构成投资建议。", fontsize=10, color="#98a2b3")
     path = os.path.join(OUT, "三大指数对比.png")
     fig.savefig(path, dpi=160, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -219,11 +270,11 @@ def render_report(rows, be):
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
-        peak_pe = f"{r['peak_pe']:.1f} 倍（{r['peak_pe_date']}）" if r["peak_pe"] is not None else "—"
+        peak_pe = f"{r['peak_pe']:.1f} 倍{'*' if r['is_shanghai'] else ''}（{r['peak_pe_date']}）" if r["peak_pe"] is not None else "—"
         lines.append(
             f"| {r['name']} | {r['last']:,.2f} | {r['last_date']} | {r['peak']:,.2f}（{r['peak_date']}） "
             f"| {r['dd']:.1f}% | {r['maxdd']:.1f}% | {r['days']} 天 | {r['chg2w']:+.1f}% | {r['pe']} | {r['pct']} | {peak_pe} |")
-    lines += ["", "图文件：股债对照.png、三大指数对比.png；表格文本：三大指数对比.md。自动生成，不构成投资建议。"]
+    lines += ["", "* 上证为沪市整体平均 PE（交易所口径），分位按近 10 年月末序列计算；其余指数为蛋卷 PE-TTM。上证高点 PE 取上交所当日值；其余指数取距离高点日最近的蛋卷记录。", "", "图文件：股债对照.png、三大指数对比.png；表格文本：三大指数对比.md。自动生成，不构成投资建议。"]
     md = "\n".join(lines)
     with open(os.path.join(OUT, "三大指数对比.md"), "w", encoding="utf-8") as f:
         f.write(md)
